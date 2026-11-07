@@ -20,8 +20,11 @@
 #include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/system_archive/system_archive.h"
+#include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_shared_memory.h"
+#include "core/hle/kernel/k_transfer_memory.h"
 #include "core/hle/kernel/kernel.h"
+#include "core/hle/kernel/svc_results.h"
 #include "core/hle/service/cmif_serialization.h"
 #include "common/alignment.h"
 #include "core/hle/service/filesystem/filesystem.h"
@@ -33,6 +36,74 @@ namespace Service::NS {
 struct FontRegion {
     u32 offset;
     u32 size;
+};
+
+// Switch 2 font descriptor: u32 flags, u32 offset, u32 size.
+struct BuiltInFontDescriptor {
+    u32_le flags;
+    u32_le offset;
+    u32_le size;
+};
+static_assert(sizeof(BuiltInFontDescriptor) == 12);
+
+// Returned by OpenFont: the fonts live in the caller's transfer memory, and the offsets are
+// relative to it. Empty regions are fonts that could not be loaded.
+class IFontService final : public ServiceFramework<IFontService> {
+public:
+    explicit IFontService(Core::System& system_, Kernel::KTransferMemory* memory_,
+                          std::vector<FontRegion> regions_)
+        : ServiceFramework{system_, "IFontService"}, memory{memory_},
+          regions{std::move(regions_)} {
+        memory->Open(kernel);
+        static const FunctionInfo functions[] = {
+            {0, &IFontService::GetFontData, "GetFontData"},
+            {1, &IFontService::GetFontDataSet, "GetFontDataSet"},
+        };
+        RegisterHandlers(functions);
+    }
+
+    ~IFontService() override {
+        memory->Close(kernel);
+    }
+
+private:
+    void GetFontData(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const u32 type = rp.Pop<u32>() & 0xff;
+        const bool found = type < regions.size() && regions[type].size != 0;
+        const FontRegion region = found ? regions[type] : FontRegion{0, 0};
+        LOG_DEBUG(Service_NS, "type={} found={} offset={:#x} size={:#x}", type, found,
+                  region.offset, region.size);
+        IPC::ResponseBuilder rb{ctx, 2 + 4};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(found ? 1 : 0);
+        rb.Push<u32>(0);
+        rb.Push<u32>(region.offset);
+        rb.Push<u32>(region.size);
+    }
+
+    void GetFontDataSet(HLERequestContext& ctx) {
+        const auto types = ctx.ReadBuffer();
+        const auto capacity = ctx.GetWriteBufferSize() / sizeof(BuiltInFontDescriptor);
+        std::vector<BuiltInFontDescriptor> descriptors;
+        for (const auto type : types) {
+            if (descriptors.size() == capacity) {
+                break;
+            }
+            if (type < regions.size() && regions[type].size != 0) {
+                descriptors.push_back({0, regions[type].offset, regions[type].size});
+            }
+        }
+        ctx.WriteBuffer(descriptors);
+        IPC::ResponseBuilder rb{ctx, 4};
+        rb.Push(ResultSuccess);
+        rb.Push<u32>(descriptors.empty() ? 0 : 1);
+        rb.Push<u32>(static_cast<u32>(descriptors.size()));
+    }
+
+    // The SDK closes its copy handle after OpenFont. Keep the transferred pages alive.
+    Kernel::KTransferMemory* memory;
+    std::vector<FontRegion> regions;
 };
 
 // The below data is specific to shared font data dumped from Switch on f/w 2.2
@@ -120,6 +191,8 @@ IPlatformServiceManager::IPlatformServiceManager(Core::System& system_, const ch
         {1001, nullptr, "GetNgWordDataSizeForPlatformRegionChina"},
         {2000, &IPlatformServiceManager::GetBuiltInFontSharedMemory, "GetBuiltInFontSharedMemory (Switch 2)"},
         {2010, &IPlatformServiceManager::GetBuiltInFontData, "GetBuiltInFontData (Switch 2)"},
+        {2020, &IPlatformServiceManager::GetBuiltInFontDataSet, "GetBuiltInFontDataSet (Switch 2)"},
+        {2100, &IPlatformServiceManager::OpenFont, "OpenFont (Switch 2)"},
     };
     // clang-format on
     RegisterHandlers(functions);
@@ -240,6 +313,72 @@ void IPlatformServiceManager::GetBuiltInFontData(HLERequestContext& ctx) {
     rb.Push<u32>(0);
     rb.Push<u32>(region.offset);
     rb.Push<u32>(region.size);
+}
+
+// nn::pl::GetBuiltInFontDataSet: up to six u8 font types in, an array of 12-byte descriptors out.
+// Reply: bool available, u32 descriptor count.
+void IPlatformServiceManager::GetBuiltInFontDataSet(HLERequestContext& ctx) {
+    const auto types = ctx.ReadBuffer();
+    const auto capacity =
+        std::min<size_t>(6, ctx.GetWriteBufferSize() / sizeof(BuiltInFontDescriptor));
+    const auto& regions = impl->builtin_font_regions;
+    std::vector<BuiltInFontDescriptor> descriptors;
+    for (const auto type : types) {
+        if (descriptors.size() == capacity) {
+            break;
+        }
+        if (type < regions.size() && regions[type].size != 0) {
+            descriptors.push_back({0, regions[type].offset, regions[type].size});
+        }
+    }
+    ctx.WriteBuffer(descriptors);
+    LOG_INFO(Service_NS, "Switch 2 GetBuiltInFontDataSet: {} requested, {} available",
+             types.size(), descriptors.size());
+    IPC::ResponseBuilder rb{ctx, 4};
+    rb.Push(ResultSuccess);
+    rb.Push<u32>(descriptors.empty() ? 0 : 1);
+    rb.Push<u32>(static_cast<u32>(descriptors.size()));
+}
+
+// nn::pl OpenFont (u32 kind, u32 size, copy handle transfer memory): copies the built-in fonts into
+// the caller's transfer memory at the same offsets as GetBuiltInFontSharedMemory and returns an
+// IFontService whose descriptors point into it. Super Mario Bros. Wonder NS2 Edition hangs while
+// loading without it.
+void IPlatformServiceManager::OpenFont(HLERequestContext& ctx) {
+    IPC::RequestParser rp{ctx};
+    const auto kind = static_cast<u8>(rp.Pop<u32>());
+    const u32 size = rp.Pop<u32>();
+    auto memory = ctx.GetObjectFromHandle<Kernel::KTransferMemory>(ctx.GetCopyHandle(0));
+    Result result = ResultSuccess;
+    if (kind != 0) {
+        result = Kernel::ResultInvalidEnumValue;
+    } else if (memory.IsNull() || memory->GetOwner() == nullptr) {
+        result = Kernel::ResultInvalidHandle;
+    } else if (size > memory->GetSize() || size < impl->builtin_font_memory_size) {
+        result = Kernel::ResultInvalidSize;
+    }
+    if (result.IsError()) {
+        LOG_ERROR(Service_NS, "OpenFont kind={} size={:#x} needs {:#x}: {:#x}", kind, size,
+                  impl->builtin_font_memory_size, result.raw);
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(result);
+        return;
+    }
+    auto& owner_memory = memory->GetOwner()->GetMemory();
+    for (size_t i = 0; i < impl->builtin_font_regions.size(); ++i) {
+        const auto& region = impl->builtin_font_regions[i];
+        owner_memory.WriteBlock(memory->GetSourceAddress() + region.offset,
+                                impl->shared_font.data() + impl->builtin_font_sources[i],
+                                region.size);
+    }
+    LOG_INFO(Service_NS, "Switch 2 OpenFont: {} fonts in {:#x} bytes of transfer memory",
+             impl->builtin_font_regions.size(), size);
+    IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+    rb.Push(ResultSuccess);
+    rb.PushIpcInterface<IFontService>(
+        ctx, system, memory.GetPointerUnsafe(),
+        std::vector<FontRegion>{impl->builtin_font_regions.begin(),
+                                impl->builtin_font_regions.end()});
 }
 
 IPlatformServiceManager::~IPlatformServiceManager() {
