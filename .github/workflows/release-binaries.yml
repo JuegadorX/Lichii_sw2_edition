@@ -611,11 +611,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # A single artifact downloads without its own folder, so name the folder the packaging expects.
       - name: Download binaries
         uses: actions/download-artifact@v7
         with:
-          pattern: lichii-*-${{ github.sha }}
-          path: artifacts
+          name: lichii-windows-x86_64-${{ github.sha }}
+          path: artifacts/lichii-windows-x86_64-${{ github.sha }}
 
       - name: Package release files
         shell: bash
