@@ -86,6 +86,20 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{0x3C46200, DYNAMIC_FPS_ROUTINE, {}, true},
 };
 
+// Super Mario Bros. Wonder NS2 Edition picks its simulation rate (primary and fallback paths) and
+// NVN present interval here. Raising both together gives 60 fps at normal game speed; changing
+// only the interval would run the game twice as fast. From Orchid's Wonder frame-rate patch.
+constexpr std::array<u8, 4> WONDER_60FPS_RATE{0x81, 0x07, 0x80, 0x52};        // mov w1, #60
+constexpr std::array<u8, 4> WONDER_60FPS_INTERVAL{0x21, 0x00, 0x80, 0x52};    // mov w1, #1
+constexpr std::array<u8, 4> WONDER_RATE_ORIGINAL{0x01, 0x0D, 0xCA, 0x1A};
+constexpr std::array<u8, 4> WONDER_INTERVAL_ORIGINAL{0x81, 0x42, 0x40, 0xB9};
+constexpr std::array<u8, 4> WONDER_FALLBACK_RATE_ORIGINAL{0x81, 0x52, 0x40, 0xB9};
+constexpr std::array WONDER_60FPS_RECORDS{
+    BuiltinPatchRecord{0x1BBFB0, WONDER_60FPS_RATE, WONDER_RATE_ORIGINAL},
+    BuiltinPatchRecord{0x1BBFCC, WONDER_60FPS_INTERVAL, WONDER_INTERVAL_ORIGINAL},
+    BuiltinPatchRecord{0x1BC04C, WONDER_60FPS_RATE, WONDER_FALLBACK_RATE_ORIGINAL},
+};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -104,6 +118,13 @@ constexpr std::array BUILTIN_PATCHES{
         .records = DYNAMIC_FPS_RECORDS,
         .state_offset = 0x4E9FE00,
         .state_size = 16,
+    },
+    BuiltinPatch{
+        .name = "60 FPS (built-in)",
+        .title_id = 0x040015100B514001,
+        .module = "main",
+        .build_id = "EC47E6F8846D2A7B6892E2682845C7255F7117AE",
+        .records = WONDER_60FPS_RECORDS,
     },
 };
 
