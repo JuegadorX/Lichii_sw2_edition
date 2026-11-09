@@ -174,6 +174,15 @@ struct IPlatformServiceManager::Impl {
     boost::container::static_vector<u32, 8> builtin_font_sources;
     /// The standard font with the controller button icons added, when the firmware's lacks them.
     std::vector<u8> builtin_standard_font;
+    /// The data the Switch 2 built-in font at index i is copied from: the merged standard font
+    /// when there is one, else the firmware's font in shared_font.
+    const u8* BuiltInFontSource(size_t index) const {
+        if (index == static_cast<size_t>(SharedFontType::JapanUSEuropeStandard) &&
+            !builtin_standard_font.empty()) {
+            return builtin_standard_font.data();
+        }
+        return shared_font.data() + builtin_font_sources[index];
+    }
     u32 builtin_font_memory_size{};
     /// Made by the first GetBuiltInFontSharedMemory (Switch 2 titles only).
     Kernel::KSharedMemory* builtin_font_memory{};
@@ -308,12 +317,7 @@ void IPlatformServiceManager::GetBuiltInFontSharedMemory(HLERequestContext& ctx)
         u8* const data = memory->GetPointer();
         std::memset(data, 0, impl->builtin_font_memory_size);
         for (size_t i = 0; i < impl->builtin_font_regions.size(); ++i) {
-            const u8* source = impl->shared_font.data() + impl->builtin_font_sources[i];
-            if (i == static_cast<size_t>(SharedFontType::JapanUSEuropeStandard) &&
-                !impl->builtin_standard_font.empty()) {
-                source = impl->builtin_standard_font.data();
-            }
-            std::memcpy(data + impl->builtin_font_regions[i].offset, source,
+            std::memcpy(data + impl->builtin_font_regions[i].offset, impl->BuiltInFontSource(i),
                         impl->builtin_font_regions[i].size);
         }
         impl->builtin_font_memory = memory;
@@ -401,9 +405,9 @@ void IPlatformServiceManager::OpenFont(HLERequestContext& ctx) {
     auto& owner_memory = memory->GetOwner()->GetMemory();
     for (size_t i = 0; i < impl->builtin_font_regions.size(); ++i) {
         const auto& region = impl->builtin_font_regions[i];
+        // Same data as GetBuiltInFontSharedMemory, including the merged standard font.
         owner_memory.WriteBlock(memory->GetSourceAddress() + region.offset,
-                                impl->shared_font.data() + impl->builtin_font_sources[i],
-                                region.size);
+                                impl->BuiltInFontSource(i), region.size);
     }
     LOG_INFO(Service_NS, "Switch 2 OpenFont: {} fonts in {:#x} bytes of transfer memory",
              impl->builtin_font_regions.size(), size);
