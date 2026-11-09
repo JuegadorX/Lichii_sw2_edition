@@ -121,6 +121,10 @@ public:
         return (vertex_repack_mask & (1U << binding)) != 0;
     }
 
+    bool AnyVertexRepacked() const {
+        return vertex_repack_mask != 0;
+    }
+
     u64 CurrentTick();
 
     bool IsFree(u64 tick);
@@ -143,6 +147,9 @@ public:
     u32 GetUniformBufferAlignment() const;
 
     u32 GetStorageBufferAlignment() const;
+
+    /// Largest range a storage buffer binding may have
+    u64 GetMaxStorageBufferRange() const;
 
     [[nodiscard]] StagingBufferRef UploadStagingBuffer(size_t size);
 
